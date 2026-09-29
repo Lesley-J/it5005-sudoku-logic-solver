@@ -45,7 +45,11 @@ def puzzle_solution(index):
 
 BOARD_STYLE = """
 <style>
-.sudoku-board {border: 3px solid #41444b; border-collapse: collapse; margin: .5rem 0 1rem;}
+.sudoku-wrap {display: flex; justify-content: center; width: 100%;}
+.sudoku-board {
+    border: 3px solid #41444b; border-collapse: collapse; margin: .35rem auto .8rem;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, .08);
+}
 .sudoku-board td {
     border: 1px solid #a8abb2; width: 2.7rem; height: 2.7rem;
     text-align: center; font-size: 1.15rem; font-variant-numeric: tabular-nums;
@@ -56,6 +60,9 @@ BOARD_STYLE = """
 .sudoku-board .focus {box-shadow: inset 0 0 0 3px #e58b2a;}
 .sudoku-board .box-right {border-right: 3px solid #41444b;}
 .sudoku-board .box-bottom {border-bottom: 3px solid #41444b;}
+@media (max-width: 520px) {
+    .sudoku-board td {width: 9vw; height: 9vw; font-size: 1rem;}
+}
 </style>
 """
 
@@ -89,7 +96,10 @@ def render_board(givens, solved=None, focus=None):
         rows.append("<tr>" + "".join(cells) + "</tr>")
 
     table = '<table class="sudoku-board">' + "".join(rows) + "</table>"
-    st.markdown(BOARD_STYLE + table, unsafe_allow_html=True)
+    st.markdown(
+        BOARD_STYLE + '<div class="sudoku-wrap">' + table + "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -115,6 +125,22 @@ def knowledge_base_sizes(index):
     general = build_general_kb(N, BOX_H, BOX_W, givens)
     definite = build_definite_kb(N, BOX_H, BOX_W, givens)
     return len(general.clauses), len(definite.clauses)
+
+
+def solved_values_for(index):
+    """Return the current solved values only when they belong to this puzzle."""
+    result = st.session_state.get("solved_result")
+    if result and result[0] == index:
+        return result[2]
+    return {}
+
+
+def query_result_for(index, row, column, value):
+    """Ignore an old verdict after the puzzle or query inputs have changed."""
+    result = st.session_state.get("query_result")
+    if result and result[:4] == (index, row, column, value):
+        return result
+    return None
 
 
 def _proof_steps(kb, target):
@@ -245,6 +271,10 @@ def describe_step(premises, conclusion):
     )
 
 
+st.session_state.setdefault("query_row", 1)
+st.session_state.setdefault("query_column", 1)
+st.session_state.setdefault("query_value", 1)
+
 st.title("Sudoku Logic Solver")
 st.write(
     "Choose a puzzle, compare the two inference methods, or ask why a value "
@@ -260,8 +290,50 @@ selected_index = st.selectbox(
     ),
 )
 givens = puzzle_givens(selected_index)
-st.caption("Blue bold digits are givens. Grey cells still need to be solved.")
-render_board(givens)
+query_row = int(st.session_state["query_row"])
+query_column = int(st.session_state["query_column"])
+query_value = int(st.session_state["query_value"])
+current_values = solved_values_for(selected_index)
+
+st.caption(
+    "Blue bold digits are givens; green digits are solver results; "
+    "the orange outline follows the cell selected in Section 3."
+)
+render_board(
+    givens,
+    current_values,
+    focus=(query_row, query_column),
+)
+
+top_left, top_middle, top_right = st.columns(3)
+top_left.metric("Selected cell", f"R{query_row}C{query_column}")
+top_middle.metric("Candidate", query_value)
+if (query_row, query_column) in givens:
+    board_state = f"Given: {givens[(query_row, query_column)]}"
+elif (query_row, query_column) in current_values:
+    board_state = f"Solved: {current_values[(query_row, query_column)]}"
+else:
+    board_state = "Not filled"
+top_right.metric("Board state", board_state)
+
+top_query_result = query_result_for(
+    selected_index, query_row, query_column, query_value
+)
+if top_query_result:
+    top_verdict, top_seconds = top_query_result[4], top_query_result[5]
+    top_message = (
+        f"Latest query: R{query_row}C{query_column} = {query_value} → "
+        f"{top_verdict} ({top_seconds * 1000:.1f} ms)"
+    )
+    if top_verdict:
+        st.success(top_message)
+    else:
+        st.error(top_message)
+else:
+    st.caption(
+        f"Current query: R{query_row}C{query_column} = {query_value}. "
+        "Change it below in Section 3; both boards update immediately."
+    )
 
 with st.expander("Knowledge-base size"):
     general_count, definite_count = knowledge_base_sizes(selected_index)
@@ -288,6 +360,7 @@ if st.button("Solve puzzle", type="primary"):
         solved_grid,
         solve_seconds,
     )
+    st.rerun()
 
 solved_result = st.session_state.get("solved_result")
 if solved_result and solved_result[0] == selected_index:
@@ -302,11 +375,42 @@ if solved_result and solved_result[0] == selected_index:
         st.warning(f"The solver derived {len(solved_grid)} of {N * N} cells.")
 
 st.subheader("3. Check one cell")
+st.write(
+    "Adjust the row and column to move the orange outline on both boards. "
+    "The candidate is only tested after **Check entailment** is pressed."
+)
 row_col, column_col, value_col = st.columns(3)
-query_row = int(row_col.number_input("Row", min_value=1, max_value=N, value=1))
-query_column = int(column_col.number_input("Column", min_value=1, max_value=N, value=1))
-query_value = int(value_col.number_input("Value", min_value=1, max_value=N, value=1))
-render_board(givens, focus=(query_row, query_column))
+query_row = int(
+    row_col.number_input("Row", min_value=1, max_value=N, key="query_row")
+)
+query_column = int(
+    column_col.number_input(
+        "Column", min_value=1, max_value=N, key="query_column"
+    )
+)
+query_value = int(
+    value_col.number_input("Value", min_value=1, max_value=N, key="query_value")
+)
+
+preview_left, preview_middle, preview_right = st.columns(3)
+preview_left.metric("Live focus", f"R{query_row}C{query_column}")
+preview_middle.metric("Testing value", query_value)
+if (query_row, query_column) in givens:
+    preview_state = f"Given: {givens[(query_row, query_column)]}"
+elif (query_row, query_column) in current_values:
+    preview_state = f"Solved: {current_values[(query_row, query_column)]}"
+else:
+    preview_state = "Not filled"
+preview_right.metric("Current value", preview_state)
+render_board(
+    givens,
+    current_values,
+    focus=(query_row, query_column),
+)
+st.caption(
+    "This is the same current board shown in Section 1, so the selected cell "
+    "and any solved values can be checked here without scrolling back up."
+)
 
 if st.button("Check entailment"):
     with st.spinner("Running backward chaining..."):
@@ -316,11 +420,12 @@ if st.button("Check entailment"):
     st.session_state["query_result"] = (
         selected_index, query_row, query_column, query_value, verdict, query_seconds
     )
+    st.rerun()
 
-query_result = st.session_state.get("query_result")
-if query_result and query_result[:4] == (
+query_result = query_result_for(
     selected_index, query_row, query_column, query_value
-):
+)
+if query_result:
     verdict = query_result[4]
     query_seconds = query_result[5]
     if verdict:
