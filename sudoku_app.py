@@ -6,7 +6,6 @@ from pathlib import Path
 import re
 import time
 
-import pandas as pd
 import streamlit as st
 from logic_ import conjuncts, is_prop_symbol
 from sudoku_solver import (
@@ -62,8 +61,26 @@ BOARD_STYLE = """
 .sudoku-board .focus {box-shadow: inset 0 0 0 3px #e58b2a;}
 .sudoku-board .box-right {border-right: 3px solid #41444b;}
 .sudoku-board .box-bottom {border-bottom: 3px solid #41444b;}
+.grid-header, .grid-row-label {
+    text-align: center; color: #5c6370; font-size: .82rem; line-height: 2.35rem;
+}
+div[data-testid="stTextInput"] {margin-bottom: -.65rem; min-width: 0; width: 100%;}
+div[data-testid="stTextInput"] input {
+    width: 100%; min-width: 0; height: 2.35rem; min-height: 2.35rem; padding: 0;
+    border-radius: 0; text-align: center; font-size: 1rem;
+    font-weight: 600; background: #f5f6f8;
+}
+div[data-testid="stForm"] div[data-testid="stHorizontalBlock"] {
+    display: flex !important; flex-direction: row !important;
+    flex-wrap: nowrap !important; gap: 0 !important;
+}
+div[data-testid="stForm"] div[data-testid="stColumn"] {
+    min-width: 0 !important; width: 0 !important; flex: 1 1 0% !important;
+}
 @media (max-width: 520px) {
     .sudoku-board td {width: 9vw; height: 9vw; font-size: 1rem;}
+    .grid-header, .grid-row-label {font-size: .68rem;}
+    div[data-testid="stTextInput"] input {font-size: .86rem;}
 }
 </style>
 """
@@ -154,11 +171,6 @@ def accepted_values_for(index):
     return st.session_state.get("accepted_values", {}).get(index, {})
 
 
-def input_lock_for(index):
-    """Return the failed attempt that currently locks this puzzle, if any."""
-    return st.session_state.get("input_locks", {}).get(index)
-
-
 def store_candidate_result(index, row, column, value, verdict, seconds):
     """Keep one verdict and add only entailed values to the test board."""
     st.session_state["query_result"] = (
@@ -173,21 +185,13 @@ def store_candidate_result(index, row, column, value, verdict, seconds):
             }
             accepted.setdefault(index, {})[(row, column)] = value
             st.session_state["accepted_values"] = accepted
-    else:
-        locks = dict(st.session_state["input_locks"])
-        locks[index] = (row, column, value)
-        st.session_state["input_locks"] = locks
 
 
 def clear_test_state(index):
-    """Clear accepted test values and unlock input without touching solver output."""
+    """Clear accepted test values without touching the full-grid solver output."""
     accepted = dict(st.session_state["accepted_values"])
     accepted.pop(index, None)
     st.session_state["accepted_values"] = accepted
-
-    locks = dict(st.session_state["input_locks"])
-    locks.pop(index, None)
-    st.session_state["input_locks"] = locks
 
     versions = dict(st.session_state["grid_versions"])
     versions[index] = versions.get(index, 0) + 1
@@ -196,27 +200,13 @@ def clear_test_state(index):
     st.session_state.pop("trace_result", None)
 
 
-def direct_input_grid(givens, accepted):
-    """Build the editable grid shown in the direct-input form."""
-    rows = []
-    for row in range(1, N + 1):
-        item = {"Row": f"R{row}"}
-        for column in range(1, N + 1):
-            position = (row, column)
-            value = givens.get(position, accepted.get(position, ""))
-            item[f"C{column}"] = str(value) if value != "" else ""
-        rows.append(item)
-    return pd.DataFrame(rows)
-
-
-def read_direct_entry(edited_grid, givens, accepted):
+def read_direct_entry(edited_values, givens, accepted):
     """Validate the grid and return its one newly entered candidate."""
     changes = []
     for row in range(1, N + 1):
         for column in range(1, N + 1):
             position = (row, column)
-            raw_value = edited_grid.at[row - 1, f"C{column}"]
-            text = "" if pd.isna(raw_value) else str(raw_value).strip()
+            text = str(edited_values[position]).strip()
             baseline = givens.get(position, accepted.get(position, ""))
             baseline_text = str(baseline) if baseline != "" else ""
             if text == baseline_text:
@@ -238,6 +228,33 @@ def read_direct_entry(edited_grid, givens, accepted):
     if len(changes) > 1:
         return None, "Input error: please test one new cell at a time."
     return changes[0], None
+
+
+def editable_board_style(givens, accepted, focus):
+    """Style the form inputs so the editable grid still reads like a Sudoku board."""
+    rules = []
+    for row in range(1, N + 1):
+        for column in range(1, N + 1):
+            position = (row, column)
+            selector = f'input[aria-label="R{row}C{column}"]'
+            declarations = []
+            if position in givens:
+                declarations.extend(
+                    ["background:#e8eef9", "color:#17243d", "-webkit-text-fill-color:#17243d"]
+                )
+            elif position in accepted:
+                declarations.extend(
+                    ["background:#fff4e8", "color:#7b3fc6", "-webkit-text-fill-color:#7b3fc6"]
+                )
+            if column in (3, 6):
+                declarations.append("border-right:3px solid #41444b")
+            if row in (3, 6):
+                declarations.append("border-bottom:3px solid #41444b")
+            if position == focus:
+                declarations.append("box-shadow:inset 0 0 0 3px #e58b2a")
+            if declarations:
+                rules.append(f"{selector}{{{';'.join(declarations)}}}")
+    return "<style>" + "".join(rules) + "</style>"
 
 
 def _proof_steps(kb, target):
@@ -372,7 +389,6 @@ st.session_state.setdefault("query_row", 1)
 st.session_state.setdefault("query_column", 1)
 st.session_state.setdefault("query_value", 1)
 st.session_state.setdefault("accepted_values", {})
-st.session_state.setdefault("input_locks", {})
 st.session_state.setdefault("grid_versions", {})
 pending_query = st.session_state.pop("pending_query", None)
 if pending_query:
@@ -400,7 +416,6 @@ query_column = int(st.session_state["query_column"])
 query_value = int(st.session_state["query_value"])
 current_values = solved_values_for(selected_index)
 accepted_values = accepted_values_for(selected_index)
-input_lock = input_lock_for(selected_index)
 
 st.caption(
     "Blue bold digits are givens; green digits are solver results; purple digits "
@@ -491,20 +506,13 @@ st.write(
 )
 row_col, column_col, value_col = st.columns(3)
 query_row = int(
-    row_col.number_input(
-        "Row", min_value=1, max_value=N, key="query_row", disabled=bool(input_lock)
-    )
+    row_col.number_input("Row", min_value=1, max_value=N, key="query_row")
 )
 query_column = int(
-    column_col.number_input(
-        "Column", min_value=1, max_value=N, key="query_column",
-        disabled=bool(input_lock)
-    )
+    column_col.number_input("Column", min_value=1, max_value=N, key="query_column")
 )
 query_value = int(
-    value_col.number_input(
-        "Value", min_value=1, max_value=N, key="query_value", disabled=bool(input_lock)
-    )
+    value_col.number_input("Value", min_value=1, max_value=N, key="query_value")
 )
 
 preview_left, preview_middle, preview_right = st.columns(3)
@@ -517,20 +525,13 @@ elif (query_row, query_column) in accepted_values:
 else:
     preview_state = "Not filled"
 preview_right.metric("Current value", preview_state)
-render_board(
-    givens,
-    attempts=accepted_values,
-    focus=(query_row, query_column),
-)
 st.caption(
-    "This board contains givens and values accepted during testing only. A full-grid "
-    "solution from Section 2 does not fill these empty cells."
+    "Use Row / Column / Value above, or type one digit directly into an empty cell "
+    "below. Blue cells are givens; purple cells are verified test values."
 )
 
 check_col, reset_col = st.columns(2)
-check_pressed = check_col.button(
-    "Check entailment", disabled=bool(input_lock), use_container_width=True
-)
+check_pressed = check_col.button("Check entailment", use_container_width=True)
 if reset_col.button("Clear / reset tests", use_container_width=True):
     clear_test_state(selected_index)
     st.rerun()
@@ -543,6 +544,10 @@ if check_pressed:
     store_candidate_result(
         selected_index, query_row, query_column, query_value, verdict, query_seconds
     )
+    if verdict:
+        versions = dict(st.session_state["grid_versions"])
+        versions[selected_index] = versions.get(selected_index, 0) + 1
+        st.session_state["grid_versions"] = versions
     st.rerun()
 
 query_result = query_result_for(
@@ -559,42 +564,56 @@ if query_result:
     else:
         st.error(
             f"False — the KB does not entail R{query_row}C{query_column} = "
-            f"{query_value} ({query_seconds * 1000:.1f} ms). Input is locked; "
-            "use Clear / reset tests to try again."
+            f"{query_value} ({query_seconds * 1000:.1f} ms). Change the value "
+            "and try again."
         )
 
-st.markdown("#### Direct puzzle input")
-st.caption(
-    "Enter one candidate directly in an empty cell, then press Check grid entry. "
-    "Use a single digit from 1 to 9; blank or 0 leaves a cell empty. Blue givens and "
-    "purple verified values are protected."
-)
 grid_version = st.session_state["grid_versions"].get(selected_index, 0)
-with st.form(f"direct_grid_form_{selected_index}_{grid_version}"):
-    edited_grid = st.data_editor(
-        direct_input_grid(givens, accepted_values),
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed",
-        disabled=True if input_lock else ["Row"],
-        column_config={
-            "Row": st.column_config.TextColumn("", width="small"),
-            **{
-                f"C{column}": st.column_config.TextColumn(
-                    f"C{column}", width="small", max_chars=1
-                )
-                for column in range(1, N + 1)
-            },
-        },
-        key=f"direct_grid_{selected_index}_{grid_version}",
-    )
+st.markdown(
+    BOARD_STYLE
+    + editable_board_style(
+        givens, accepted_values, focus=(query_row, query_column)
+    ),
+    unsafe_allow_html=True,
+)
+with st.form(f"test_grid_form_{selected_index}_{grid_version}"):
+    header_columns = st.columns([0.55] + [1] * N, gap=None)
+    header_columns[0].markdown("&nbsp;", unsafe_allow_html=True)
+    for column in range(1, N + 1):
+        header_columns[column].markdown(
+            f'<div class="grid-header">C{column}</div>', unsafe_allow_html=True
+        )
+
+    edited_values = {}
+    for row in range(1, N + 1):
+        grid_columns = st.columns([0.55] + [1] * N, gap=None)
+        grid_columns[0].markdown(
+            f'<div class="grid-row-label">R{row}</div>', unsafe_allow_html=True
+        )
+        for column in range(1, N + 1):
+            position = (row, column)
+            baseline = givens.get(position, accepted_values.get(position, ""))
+            edited_values[position] = grid_columns[column].text_input(
+                f"R{row}C{column}",
+                value=str(baseline) if baseline != "" else "",
+                max_chars=1,
+                disabled=position in givens or position in accepted_values,
+                label_visibility="collapsed",
+                key=f"grid_{selected_index}_{grid_version}_{row}_{column}",
+            )
+
     grid_pressed = st.form_submit_button(
-        "Check grid entry", disabled=bool(input_lock), use_container_width=True
+        "Check entered cell", use_container_width=True
     )
+
+st.caption(
+    "The Section 2 solution never fills this grid. A false candidate is reported but "
+    "removed from the cell, so testing can continue immediately."
+)
 
 if grid_pressed:
     direct_entry, input_error = read_direct_entry(
-        edited_grid, givens, accepted_values
+        edited_values, givens, accepted_values
     )
     if input_error:
         st.error(input_error)
