@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import time
 
+import pandas as pd
 import streamlit as st
 from logic_ import conjuncts, is_prop_symbol
 from sudoku_solver import (
@@ -56,6 +57,7 @@ BOARD_STYLE = """
 }
 .sudoku-board .given {background: #e8eef9; color: #17243d; font-weight: 750;}
 .sudoku-board .answer {background: #f8fafc; color: #28735a; font-weight: 600;}
+.sudoku-board .attempt {background: #fff4e8; color: #7b3fc6; font-weight: 750;}
 .sudoku-board .empty {background: #f1f2f4; color: transparent;}
 .sudoku-board .focus {box-shadow: inset 0 0 0 3px #e58b2a;}
 .sudoku-board .box-right {border-right: 3px solid #41444b;}
@@ -67,9 +69,10 @@ BOARD_STYLE = """
 """
 
 
-def render_board(givens, solved=None, focus=None):
+def render_board(givens, solved=None, attempts=None, focus=None):
     """Draw the board and keep givens visually separate from derived values."""
     solved = solved or {}
+    attempts = attempts or {}
     rows = []
     for row in range(1, N + 1):
         cells = []
@@ -86,6 +89,9 @@ def render_board(givens, solved=None, focus=None):
             if position in givens:
                 value = givens[position]
                 classes.append("given")
+            elif position in attempts:
+                value = attempts[position]
+                classes.append("attempt")
             elif position in solved:
                 value = solved[position]
                 classes.append("answer")
@@ -141,6 +147,97 @@ def query_result_for(index, row, column, value):
     if result and result[:4] == (index, row, column, value):
         return result
     return None
+
+
+def accepted_values_for(index):
+    """Return values that the user has tested successfully for this puzzle."""
+    return st.session_state.get("accepted_values", {}).get(index, {})
+
+
+def input_lock_for(index):
+    """Return the failed attempt that currently locks this puzzle, if any."""
+    return st.session_state.get("input_locks", {}).get(index)
+
+
+def store_candidate_result(index, row, column, value, verdict, seconds):
+    """Keep one verdict and add only entailed values to the test board."""
+    st.session_state["query_result"] = (
+        index, row, column, value, verdict, seconds
+    )
+
+    if verdict:
+        if (row, column) not in puzzle_givens(index):
+            accepted = {
+                puzzle: dict(values)
+                for puzzle, values in st.session_state["accepted_values"].items()
+            }
+            accepted.setdefault(index, {})[(row, column)] = value
+            st.session_state["accepted_values"] = accepted
+    else:
+        locks = dict(st.session_state["input_locks"])
+        locks[index] = (row, column, value)
+        st.session_state["input_locks"] = locks
+
+
+def clear_test_state(index):
+    """Clear accepted test values and unlock input without touching solver output."""
+    accepted = dict(st.session_state["accepted_values"])
+    accepted.pop(index, None)
+    st.session_state["accepted_values"] = accepted
+
+    locks = dict(st.session_state["input_locks"])
+    locks.pop(index, None)
+    st.session_state["input_locks"] = locks
+
+    versions = dict(st.session_state["grid_versions"])
+    versions[index] = versions.get(index, 0) + 1
+    st.session_state["grid_versions"] = versions
+    st.session_state.pop("query_result", None)
+    st.session_state.pop("trace_result", None)
+
+
+def direct_input_grid(givens, accepted):
+    """Build the editable grid shown in the direct-input form."""
+    rows = []
+    for row in range(1, N + 1):
+        item = {"Row": f"R{row}"}
+        for column in range(1, N + 1):
+            position = (row, column)
+            value = givens.get(position, accepted.get(position, ""))
+            item[f"C{column}"] = str(value) if value != "" else ""
+        rows.append(item)
+    return pd.DataFrame(rows)
+
+
+def read_direct_entry(edited_grid, givens, accepted):
+    """Validate the grid and return its one newly entered candidate."""
+    changes = []
+    for row in range(1, N + 1):
+        for column in range(1, N + 1):
+            position = (row, column)
+            raw_value = edited_grid.at[row - 1, f"C{column}"]
+            text = "" if pd.isna(raw_value) else str(raw_value).strip()
+            baseline = givens.get(position, accepted.get(position, ""))
+            baseline_text = str(baseline) if baseline != "" else ""
+            if text == baseline_text:
+                continue
+            if not re.fullmatch(r"[0-9]?", text):
+                return None, "Input error: each cell accepts one digit from 0 to 9 only."
+            if position in givens:
+                return None, f"Input error: R{row}C{column} is a given and cannot be changed."
+            if position in accepted:
+                return None, (
+                    f"Input error: R{row}C{column} has already been verified. "
+                    "Use Clear / reset tests to start again."
+                )
+            if text not in ("", "0"):
+                changes.append((row, column, int(text)))
+
+    if not changes:
+        return None, "Input error: enter a value from 1 to 9 in one empty cell."
+    if len(changes) > 1:
+        return None, "Input error: please test one new cell at a time."
+    return changes[0], None
 
 
 def _proof_steps(kb, target):
@@ -274,6 +371,14 @@ def describe_step(premises, conclusion):
 st.session_state.setdefault("query_row", 1)
 st.session_state.setdefault("query_column", 1)
 st.session_state.setdefault("query_value", 1)
+st.session_state.setdefault("accepted_values", {})
+st.session_state.setdefault("input_locks", {})
+st.session_state.setdefault("grid_versions", {})
+pending_query = st.session_state.pop("pending_query", None)
+if pending_query:
+    st.session_state["query_row"], st.session_state["query_column"], st.session_state[
+        "query_value"
+    ] = pending_query
 
 st.title("Sudoku Logic Solver")
 st.write(
@@ -294,14 +399,17 @@ query_row = int(st.session_state["query_row"])
 query_column = int(st.session_state["query_column"])
 query_value = int(st.session_state["query_value"])
 current_values = solved_values_for(selected_index)
+accepted_values = accepted_values_for(selected_index)
+input_lock = input_lock_for(selected_index)
 
 st.caption(
-    "Blue bold digits are givens; green digits are solver results; "
-    "the orange outline follows the cell selected in Section 3."
+    "Blue bold digits are givens; green digits are solver results; purple digits "
+    "are values verified in Section 3. The orange outline follows the selected cell."
 )
 render_board(
     givens,
     current_values,
+    accepted_values,
     focus=(query_row, query_column),
 )
 
@@ -310,6 +418,8 @@ top_left.metric("Selected cell", f"R{query_row}C{query_column}")
 top_middle.metric("Candidate", query_value)
 if (query_row, query_column) in givens:
     board_state = f"Given: {givens[(query_row, query_column)]}"
+elif (query_row, query_column) in accepted_values:
+    board_state = f"Tested: {accepted_values[(query_row, query_column)]}"
 elif (query_row, query_column) in current_values:
     board_state = f"Solved: {current_values[(query_row, query_column)]}"
 else:
@@ -376,20 +486,25 @@ if solved_result and solved_result[0] == selected_index:
 
 st.subheader("3. Check one cell")
 st.write(
-    "Adjust the row and column to move the orange outline on both boards. "
-    "The candidate is only tested after **Check entailment** is pressed."
+    "Test as many empty cells as needed. Correct values stay on this test board "
+    "and also appear in Section 1; the completed grid from Section 2 is kept separate."
 )
 row_col, column_col, value_col = st.columns(3)
 query_row = int(
-    row_col.number_input("Row", min_value=1, max_value=N, key="query_row")
+    row_col.number_input(
+        "Row", min_value=1, max_value=N, key="query_row", disabled=bool(input_lock)
+    )
 )
 query_column = int(
     column_col.number_input(
-        "Column", min_value=1, max_value=N, key="query_column"
+        "Column", min_value=1, max_value=N, key="query_column",
+        disabled=bool(input_lock)
     )
 )
 query_value = int(
-    value_col.number_input("Value", min_value=1, max_value=N, key="query_value")
+    value_col.number_input(
+        "Value", min_value=1, max_value=N, key="query_value", disabled=bool(input_lock)
+    )
 )
 
 preview_left, preview_middle, preview_right = st.columns(3)
@@ -397,27 +512,35 @@ preview_left.metric("Live focus", f"R{query_row}C{query_column}")
 preview_middle.metric("Testing value", query_value)
 if (query_row, query_column) in givens:
     preview_state = f"Given: {givens[(query_row, query_column)]}"
-elif (query_row, query_column) in current_values:
-    preview_state = f"Solved: {current_values[(query_row, query_column)]}"
+elif (query_row, query_column) in accepted_values:
+    preview_state = f"Tested: {accepted_values[(query_row, query_column)]}"
 else:
     preview_state = "Not filled"
 preview_right.metric("Current value", preview_state)
 render_board(
     givens,
-    current_values,
+    attempts=accepted_values,
     focus=(query_row, query_column),
 )
 st.caption(
-    "This is the same current board shown in Section 1, so the selected cell "
-    "and any solved values can be checked here without scrolling back up."
+    "This board contains givens and values accepted during testing only. A full-grid "
+    "solution from Section 2 does not fill these empty cells."
 )
 
-if st.button("Check entailment"):
+check_col, reset_col = st.columns(2)
+check_pressed = check_col.button(
+    "Check entailment", disabled=bool(input_lock), use_container_width=True
+)
+if reset_col.button("Clear / reset tests", use_container_width=True):
+    clear_test_state(selected_index)
+    st.rerun()
+
+if check_pressed:
     with st.spinner("Running backward chaining..."):
         verdict, query_seconds = check_entailment(
             selected_index, query_row, query_column, query_value
         )
-    st.session_state["query_result"] = (
+    store_candidate_result(
         selected_index, query_row, query_column, query_value, verdict, query_seconds
     )
     st.rerun()
@@ -436,8 +559,66 @@ if query_result:
     else:
         st.error(
             f"False — the KB does not entail R{query_row}C{query_column} = "
-            f"{query_value} ({query_seconds * 1000:.1f} ms)."
+            f"{query_value} ({query_seconds * 1000:.1f} ms). Input is locked; "
+            "use Clear / reset tests to try again."
         )
+
+st.markdown("#### Direct puzzle input")
+st.caption(
+    "Enter one candidate directly in an empty cell, then press Check grid entry. "
+    "Use a single digit from 1 to 9; blank or 0 leaves a cell empty. Blue givens and "
+    "purple verified values are protected."
+)
+grid_version = st.session_state["grid_versions"].get(selected_index, 0)
+with st.form(f"direct_grid_form_{selected_index}_{grid_version}"):
+    edited_grid = st.data_editor(
+        direct_input_grid(givens, accepted_values),
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        disabled=True if input_lock else ["Row"],
+        column_config={
+            "Row": st.column_config.TextColumn("", width="small"),
+            **{
+                f"C{column}": st.column_config.TextColumn(
+                    f"C{column}", width="small", max_chars=1
+                )
+                for column in range(1, N + 1)
+            },
+        },
+        key=f"direct_grid_{selected_index}_{grid_version}",
+    )
+    grid_pressed = st.form_submit_button(
+        "Check grid entry", disabled=bool(input_lock), use_container_width=True
+    )
+
+if grid_pressed:
+    direct_entry, input_error = read_direct_entry(
+        edited_grid, givens, accepted_values
+    )
+    if input_error:
+        st.error(input_error)
+    else:
+        direct_row, direct_column, direct_value = direct_entry
+        st.session_state["pending_query"] = (
+            direct_row, direct_column, direct_value
+        )
+        with st.spinner("Running backward chaining..."):
+            verdict, query_seconds = check_entailment(
+                selected_index, direct_row, direct_column, direct_value
+            )
+        store_candidate_result(
+            selected_index,
+            direct_row,
+            direct_column,
+            direct_value,
+            verdict,
+            query_seconds,
+        )
+        versions = dict(st.session_state["grid_versions"])
+        versions[selected_index] = grid_version + 1
+        st.session_state["grid_versions"] = versions
+        st.rerun()
 
 st.subheader("4. Tutor mode")
 st.write("Show the forward-chaining rules that support the selected value.")
