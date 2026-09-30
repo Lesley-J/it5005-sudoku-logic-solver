@@ -285,9 +285,10 @@ def pl_bc_entails(kb, query):
 def solve_full_grid_bc(n, box_h, box_w, givens):
     """Solve the whole puzzle using build_definite_kb + your own pl_bc_entails.
 
-    For each cell, try each candidate value until pl_bc_entails confirms one
-    -- the same per-cell strategy as solve_full_grid_fc, but backed by
-    backward chaining instead of a single shared forward-chaining pass.
+    For each non-given cell, try candidate values in ascending order until
+    pl_bc_entails confirms one. This mirrors solve_full_grid_fc, but uses
+    backward chaining instead of pl_fc_entails. The proof state cached on the
+    KB is reused across candidate queries.
 
     Returns
     -------
